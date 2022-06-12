@@ -1,0 +1,5 @@
+char ssid[] = "SSID";     //  your network SSID (name) 
+char password[] = "PASSWORD.";  // your network password
+const IPAddress outIp(10,10,5,1); //IP address to catch OSC messages from the clock.
+const unsigned int outPort = 9999; //Outgoing UDP Port
+const unsigned int inPort = 8888; //Incoming UDP Port
