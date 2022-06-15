@@ -2,7 +2,7 @@
 
 A stepper-driven clock controlled by OSC. This was created for a production of Rodgers and Hammerstein's Cinderella. It never made the stage because as it always does, time ran out. 
 
-![Fritzing Image](images/Clock_bb.png)
+![Fritzing Image](Images/Clock_bb.png)
 
 
 ## Parts
