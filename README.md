@@ -1,9 +1,11 @@
-#OSC_Clock
+# OSC_Clock
 
 A stepper-driven clock controlled by OSC. This was created for a production of Rodgers and Hammerstein's Cinderella. It never made the stage because as it always does, time ran out. 
 
+![Fritzing Image](images/Clock_bb.png)
 
-#Parts
+
+## Parts
  * CPU: NodeMCU 12E
  * Stepper Driver: DRV8825 (https://www.pololu.com/product/2133)
  * RTC: DS3231 (https://www.adafruit.com/product/5188)
@@ -17,7 +19,7 @@ A stepper-driven clock controlled by OSC. This was created for a production of R
    * 30+mm of 5mm fiberglass rod. 
  * IR LED + IR detector
 
-#OSC commands
+## OSC commands
 
  * /clock/home - advance the clock hands to the "home" position as detected by the optical sensor. 
  * /clock/stop - stop the clock
