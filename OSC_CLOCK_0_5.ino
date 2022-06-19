@@ -5,8 +5,6 @@
  * Notes:
  * - Use caution when shifting. The current code shifts on request, this can cause offset between 
  *     real and expected position of + or - 18 seconds in extreme cases.
- * - Lower gear ratios may not keep time well, testing required.
- *
  * TODO:
  * -
  */
@@ -27,8 +25,8 @@
 #include "config.h"
 
 #ifdef DIS_SSD1306
-  #include <Adafruit_GFX.h>
-  #include <Adafruit_SSD1306.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #endif
 
 //
@@ -44,10 +42,10 @@
 //
 
 #ifdef DIS_SSD1306
-  #define SCREEN_WIDTH 128 // OLED display width, in pixels
-  #define SCREEN_HEIGHT 64 // OLED display height, in pixels
-  #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
-  #define SCREEN_ADDRESS 0x3D ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3D ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
 #endif
 
 //Set the timer 1 prescaler to 1:1, short timer, but more accurate. 
@@ -97,6 +95,7 @@ bool homed = false;
 bool dir = true; //true = cloclwise. 
 bool shift_requested = false;
 bool sync_requested = false;
+bool display_ready = false;
 
 int in_step = 0; // How many ticks before ending the step. 
 int to_step = 0; // how many ticks befor the next step;
@@ -121,7 +120,7 @@ ESP8266_ISR_Timer ISR_Timer;
 extern ESP8266_ISR_Timer ISR_Timer;  // declaration of the global variable ISRTimer
 
 #ifdef DIS_SSD1306
-  Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 #endif
 
 //
@@ -253,11 +252,12 @@ void OSCMsgReceive() {
   if((size = Udp.parsePacket())>0) {
     while(size--)
       msgIN.fill(Udp.read());
-    if(!msgIN.hasError())
+    if(!msgIN.hasError()) {
       msgIN.getAddress(address, 0);
-      sayln(address);
+      sayln("OSC:"+String(address));
       msgIN.route("/clock", ClockAction);
       //msgIN.route("/rtc", RTCAction);
+    }
   }
 }
 
@@ -279,6 +279,7 @@ void display_time(){
 void motor_enable(){
   digitalWrite(MOT_EN, LOW);
 }
+
 void motor_disable(){
   digitalWrite(MOT_EN, HIGH);
 }
@@ -465,6 +466,7 @@ String IpAddress2String(const IPAddress& ipAddress)
 }
 
 void sayln(String input){
+  if(!display_ready){ return;}
 #ifdef DIS_SERIAL
   Serial.println(input);
 #endif
@@ -475,11 +477,20 @@ void sayln(String input){
 }
 
 void say(String input){
+  if(!display_ready){ return;}
 #ifdef DIS_SERIAL
   Serial.print(input);
 #endif
 #ifdef DIS_SSD1306
   display.print(input);
+  display.display();
+#endif
+}
+
+void clear_display(){
+#ifdef DIS_SSD1306
+  display.clearDisplay();
+  display.setCursor(0,0);
   display.display();
 #endif
 }
@@ -494,7 +505,7 @@ void setup() {
 
   ESP.wdtEnable(1000);
   Wire.begin();
-  
+
 #ifdef DIS_SERIAL
   Serial.begin(115200);  // start serial for output
   while (!Serial);
@@ -509,13 +520,13 @@ void setup() {
   }
   display.invertDisplay(true);
   display.display();
-  display.invertDisplay(true);
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
   display.setCursor(0,0);
   display.cp437(true);
 #endif
+  display_ready = true;
 
   pinMode(OPTIC_PIN, INPUT); //optical sensor.
   pinMode(MOT_EN, OUTPUT);
@@ -531,7 +542,7 @@ void setup() {
 
   attachInterrupt(digitalPinToInterrupt(OPTIC_PIN), home_detected, RISING);
 
-  sayln("Pins Set");  
+  sayln("Pins Set");
   
   if (! rtc.begin(&Wire)) {
     sayln("RTC: Couldn't find RTC");
@@ -542,7 +553,7 @@ void setup() {
   }
 
   if (rtc.lostPower()) {
-    say("RTC lost power, let's set the time!");
+    sayln("RTC lost power, let's set the time!");
     // When time needs to be set on a new device, or after a power loss, the
     // following line sets the RTC to the date & time this sketch was compiled
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
@@ -559,20 +570,18 @@ void setup() {
   }
   sayln("");
   say("Wifi: ");
-
   sayln(IpAddress2String(WiFi.localIP()));
   Udp.begin(inPort);
+  clear_display();
   sayln("OSC Started");
 
-
-  sayln("Timers Started");
   unsigned long target_face_milli = get_rtc_face_millis();
   sayln("Target_Face_Milli:"+String(target_face_milli));
 
   if (ITimer.attachInterruptInterval(20, isr_tick)) {
-    Serial.print(F("Starting  ITimer OK, millis() = ")); Serial.println(millis());
+    say(F("Starting  ITimer OK, millis() = ")); Serial.println(millis());
   } else {
-    Serial.println(F("Can't set ITimer correctly. Select another freq. or interval"));
+    sayln(F("Can't set ITimer correctly. Select another freq. or interval"));
   } 
   ISR_Timer.setInterval(1, isr_step);
   ISR_Timer.setInterval(562.5, TimerHandler);
@@ -589,8 +598,11 @@ void setup() {
   motor_disable();
   dir_cw();
   mode_move(50000,true,MODE_STOP);
-
-  Serial.println("Homing");
+  
+#ifdef DIS_SSD1306
+  display.invertDisplay(false);
+  display.display();
+#endif
 }
 
 void loop(){ 
