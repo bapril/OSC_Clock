@@ -6,7 +6,7 @@
  * - Use caution when shifting. The current code shifts on request, this can cause offset between 
  *     real and expected position of + or - 18 seconds in extreme cases.
  * TODO:
- * -
+ * TODO: run modes with and without sync.
  */
 
 //
@@ -219,9 +219,7 @@ void IRAM_ATTR home_detected() {
  * /clock/run - Move @ 1:1
  * /clock/gear $gear - Set the clock gear.
  * 
- * //clock/move/speed $speed - Set Movement speed 
- * //clock/move/cw/to $hour $minute $second  - Run forward to $time at $speed
- * //clock/move/ccw/to $hour $minute $second - Run backwards to $time at $speed
+ * /clock/move/time $hour $minute $dir(1=cw, 0=ccw) $duration(seconds) $run_after(1=yes, 2=no);
  */
 
 void clock_home(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
@@ -247,12 +245,36 @@ void clock_gear(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   }
 }
 
+/*void clock_move_time(OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  int hour,minute,direction;
+  unsigned long duration = 0;
+  unsigned long target_milis = 0;
+  unsigned long steps_to_go = 0;
+  unsigned long delta_milis = 0;
+
+  hour = msg.getInt(0);
+  minute = msg.getInt(1);
+  direction = msg.getInt(2); //TODO don't ignore direction
+  duration = msg.getInt(3) * 1000; // miliseconds.
+  target_milis = get_face_millis(hour,minute);
+  if(target_milis > face_milis){
+    delta_milis = (target_face_milli - face_milis);
+    cw = true;
+  } else {
+    delta_milis = (face_milis - target_face_milli);
+    cw = false;
+  }
+  steps_to_go = (int)delta_milis/gear_milis;
+  mode_move(steps_to_go,cw,after);
+}*/
+
 void ClockAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   msg.route("/home",clock_home, addrOffset);
   msg.route("/stop", clock_stop, addrOffset);
   msg.route("/now", clock_now, addrOffset);
   msg.route("/run", clock_run, addrOffset);  
   msg.route("/gear", clock_gear, addrOffset);
+//  msg.route("/move/time", clock_move_time, addrOffset);
 //  msg.route("/speed", clock_speed, addrOffset);
 //  msg.route("/enable", enableStepper, addrOffset);
 //  msg.route("/disable", disableStepper, addrOffset);
@@ -335,6 +357,12 @@ void mode_move(unsigned long steps,bool clockwise, int after){
 void mode_stop(){
   setMode(MODE_STOP);
   motor_disable();
+}
+
+unsigned long get_face_millis(int hour, int minute){
+  if(hour > 12)
+    hour = hour - 12;
+  return ((minute * 60) + (hour * 3600)) * 1000;
 }
 
 unsigned long get_rtc_face_millis(){
