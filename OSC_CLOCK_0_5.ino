@@ -21,11 +21,15 @@
 #include "RTClib.h"
 #include <SPI.h>
 #include <Wire.h>
-//#include <Adafruit_GFX.h>
-//#include <Adafruit_SSD1306.h>
+
 #include "ESP8266TimerInterrupt.h"
 #include "ESP8266_ISR_Timer.h"
 #include "config.h"
+
+#ifdef DIS_SSD1306
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+#endif
 
 //
 // Tests
@@ -39,10 +43,12 @@
 // Defines
 //
 
-//#define SCREEN_WIDTH 128 // OLED display width, in pixels
-//#define SCREEN_HEIGHT 32 // OLED display height, in pixels
-//#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
-//#define SCREEN_ADDRESS 0x3C ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+#ifdef DIS_SSD1306
+#define SCREEN_WIDTH 128 // OLED display width, in pixels
+#define SCREEN_HEIGHT 64 // OLED display height, in pixels
+#define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
+#define SCREEN_ADDRESS 0x3D ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+#endif
 
 //Set the timer 1 prescaler to 1:1, short timer, but more accurate. 
 #define USING_TIM_DIV1                true
@@ -91,6 +97,7 @@ bool homed = false;
 bool dir = true; //true = cloclwise. 
 bool shift_requested = false;
 bool sync_requested = false;
+bool display_ready = false;
 
 int in_step = 0; // How many ticks before ending the step. 
 int to_step = 0; // how many ticks befor the next step;
@@ -100,10 +107,9 @@ int tick_count = 0; //Count the inner_step loop (32 steps per step)
 int gear;
 int gear_mask;
 int gear_milis;
-int face_milis = 0;
-int odo = 0;
 int next_mode = MODE_STOP;
 
+unsigned long face_milis = 0;
 //
 //Initializers
 //
@@ -113,8 +119,10 @@ WiFiUDP Udp;
 ESP8266Timer ITimer;
 ESP8266_ISR_Timer ISR_Timer;
 extern ESP8266_ISR_Timer ISR_Timer;  // declaration of the global variable ISRTimer
-//Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 
+#ifdef DIS_SSD1306
+Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+#endif
 //
 // Declare ISR Functions
 //
@@ -146,7 +154,6 @@ void IRAM_ATTR isr_step() {
       if (sys_mode == MODE_MOVE){
         steps_to_go--;
         if (!steps_to_go){
-          Serial.println("Move Done");
           set_next_mode();
         } else {
           to_step = INTER_STEP;
@@ -175,7 +182,6 @@ void IRAM_ATTR isr_step() {
 
 void IRAM_ATTR home_detected() {
   if (!homed){
-    Serial.println("HOME");
     mode_stop();
     homed = true;
   }
@@ -193,7 +199,6 @@ void IRAM_ATTR home_detected() {
  * /clock/stop - Stop the Clock
  * /clock/now - Move to current time.
  * /clock/run - Move @ 1:1
- * /clock/odo - read then reset Odometer. 
  * /clock/gear $gear - Set the clock gear.
  * 
  * //clock/move/speed $speed - Set Movement speed 
@@ -218,17 +223,9 @@ void clock_run(OSCMessage &msg, int addrOffset){
   mode_run();
 }
 
-void clock_odo(OSCMessage &msg, int addrOffset){
-  Serial.print("\n ODO: ");
-  Serial.println(odo);
-  odo = 0;
-}
-
 void clock_gear(OSCMessage &msg, int addrOffset){
   if (msg.isInt(0)) {
     req_shift(msg.getInt(0));
-  } else {
-    Serial.println("OSC variable 0 not of type INT");
   }
 }
 
@@ -237,7 +234,6 @@ void ClockAction(OSCMessage &msg, int addrOffset){
   msg.route("/stop", clock_stop, addrOffset);
   msg.route("/now", clock_now, addrOffset);
   msg.route("/run", clock_run, addrOffset);  
-  msg.route("/odo", clock_odo, addrOffset);
   msg.route("/gear", clock_gear, addrOffset);
 //  msg.route("/speed", clock_speed, addrOffset);
 //  msg.route("/enable", enableStepper, addrOffset);
@@ -258,7 +254,7 @@ void OSCMsgReceive() {
       msgIN.fill(Udp.read());
     if(!msgIN.hasError())
       msgIN.getAddress(address, 0);
-      Serial.println(address);
+      sayln("OSC:"+String(address));
       msgIN.route("/clock", ClockAction);
       //msgIN.route("/rtc", RTCAction);
   }
@@ -270,12 +266,19 @@ void OSCMsgReceive() {
 
 void display_time(){
   DateTime now = rtc.now();
+  #ifdef DIS_SERIAL
   Serial.println(" "+now.timestamp(DateTime::TIMESTAMP_FULL));
+  #endif
+  #ifdef DIS_SSD1306
+  display.println(" "+now.timestamp(DateTime::TIMESTAMP_FULL));
+  display.display();
+  #endif
 }
 
 void motor_enable(){
   digitalWrite(MOT_EN, LOW);
 }
+
 void motor_disable(){
   digitalWrite(MOT_EN, HIGH);
 }
@@ -308,7 +311,6 @@ void begin_step(int step_time){
   } else {
     face_milis -= gear_milis;
   }
-  odo++;
 }
 
 void mode_move(unsigned long steps,bool clockwise, int after){
@@ -345,7 +347,7 @@ void shift(int req_gear){
   motor_enable();
   switch (req_gear) {
   case 1:
-    Serial.println("Gear 1");
+    sayln("Gear 1");
     gear_mask = GEAR_MASK_1;
     gear_milis = GEAR_STEP_1;
     digitalWrite(MOT_M0,LOW);
@@ -353,7 +355,7 @@ void shift(int req_gear){
     digitalWrite(MOT_M2,LOW);
     break;
   case 2:
-    Serial.println("Gear 2");
+    sayln("Gear 2");
     gear_mask = GEAR_MASK_2;
     gear_milis = GEAR_STEP_2;
     digitalWrite(MOT_M0,HIGH);
@@ -361,7 +363,7 @@ void shift(int req_gear){
     digitalWrite(MOT_M2,LOW);
     break;
   case 4:
-    Serial.println("Gear 4");
+    sayln("Gear 4");
     gear_mask = GEAR_MASK_4;
     gear_milis = GEAR_STEP_4;
     digitalWrite(MOT_M0,LOW);
@@ -369,7 +371,7 @@ void shift(int req_gear){
     digitalWrite(MOT_M2,LOW);
     break;
   case 8:
-    Serial.println("Gear 8");
+    sayln("Gear 8");
     gear_mask = GEAR_MASK_8;
     gear_milis = GEAR_STEP_8;
     digitalWrite(MOT_M0,HIGH);
@@ -377,7 +379,7 @@ void shift(int req_gear){
     digitalWrite(MOT_M2,LOW);
     break;
   case 16:
-    Serial.println("Gear 16");
+    sayln("Gear 16");
     gear_mask = GEAR_MASK_16;
     gear_milis = GEAR_STEP_16;
     digitalWrite(MOT_M0,LOW);
@@ -385,7 +387,7 @@ void shift(int req_gear){
     digitalWrite(MOT_M2,HIGH);
     break;
   case 32:
-    Serial.println("Gear 32");
+    sayln("Gear 32");
     gear_mask = GEAR_MASK_32;
     gear_milis = GEAR_STEP_32;
     digitalWrite(MOT_M0,HIGH);
@@ -454,6 +456,43 @@ void set_next_mode(){
   }
 }
 
+String IpAddress2String(const IPAddress& ipAddress)
+{
+  return String(ipAddress[0]) + String(".") +\
+  String(ipAddress[1]) + String(".") +\
+  String(ipAddress[2]) + String(".") +\
+  String(ipAddress[3])  ; 
+}
+
+void sayln(String input){
+  if(!display_ready){ return;}
+#ifdef DIS_SERIAL
+  Serial.println(input);
+#endif
+#ifdef DIS_SSD1306
+  display.println(input);
+  display.display();
+#endif
+}
+
+void say(String input){
+  if(!display_ready){ return;}
+#ifdef DIS_SERIAL
+  Serial.print(input);
+#endif
+#ifdef DIS_SSD1306
+  display.print(input);
+  display.display();
+#endif
+}
+
+void clear_display(){
+#ifdef DIS_SSD1306
+  display.clearDisplay();
+  display.setCursor(0,0);
+  display.display();
+#endif
+}
 //
 // Declare Arduino Functions
 //
@@ -464,16 +503,29 @@ void setup() {
 
   ESP.wdtEnable(1000);
   Wire.begin();
-  
+
+#ifdef DIS_SERIAL
   Serial.begin(115200);  // start serial for output
   while (!Serial);
   Serial.println("\nBegin:");
+#endif
 
+#ifdef DIS_SSD1306
   //SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
-  //if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
-  //  Serial.println(F("SSD1306 allocation failed"));
-  //  for(;;); // Don't proceed, loop forever
-  //}
+  if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
+    Serial.println(F("SSD1306 allocation failed"));
+    for(;;); // Don't proceed, loop forever
+  }
+  display.invertDisplay(true);
+  display.display();
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0,0);
+  display.cp437(true);
+#endif
+  display_ready = true;
+
   
   pinMode(OPTIC_PIN, INPUT); //optical sensor.
   pinMode(MOT_EN, OUTPUT);
@@ -490,19 +542,18 @@ void setup() {
   attachInterrupt(digitalPinToInterrupt(OPTIC_PIN), home_detected, RISING);
 
 
-  Serial.println("Pins Set");
+  sayln("Pins Set");
   
   if (! rtc.begin(&Wire)) {
-    Serial.println("RTC: Couldn't find RTC");
-    Serial.flush();
+    sayln("RTC: Couldn't find RTC");
     while (1) delay(10);
   } else {
-    Serial.print("RTC: enabled:");
+    sayln("RTC: enabled:");
     display_time(); 
   }
 
   if (rtc.lostPower()) {
-    Serial.println("RTC lost power, let's set the time!");
+    sayln("RTC lost power, let's set the time!");
     // When time needs to be set on a new device, or after a power loss, the
     // following line sets the RTC to the date & time this sketch was compiled
     rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
@@ -515,31 +566,45 @@ void setup() {
   while (WiFi.status() != WL_CONNECTED) {
     delay(250);
     ESP.wdtFeed();
-    Serial.print(".");
+    say(".");
   }
-
-  Serial.println(WiFi.localIP());
+  sayln("");
+  sayln("Wifi:");
+  sayln(IpAddress2String(WiFi.localIP()));
   Udp.begin(inPort);
-  Serial.println("OSC Started");
+  clear_display();
+  sayln("OSC Started");
   
-  Serial.println("Timers Started");
-  Serial.print("RTC Time: ");
-  display_time(); 
   unsigned long target_face_milli = get_rtc_face_millis();
-  Serial.print("Target_Face_Milli:");
-  Serial.println(target_face_milli);
+  say("Target_Face_Milli:");
+  //sayln(target_face_milli);
 
   if (ITimer.attachInterruptInterval(20, isr_tick)) {
-    Serial.print(F("Starting  ITimer OK, millis() = ")); Serial.println(millis());
+    say(F("Starting  ITimer OK, millis() = ")); Serial.println(millis());
   } else {
-    Serial.println(F("Can't set ITimer correctly. Select another freq. or interval"));
+    sayln(F("Can't set ITimer correctly. Select another freq. or interval"));
   } 
   ISR_Timer.setInterval(1, isr_step);
   ISR_Timer.setInterval(562.5, TimerHandler);
 
-  mode_move(50000,true,MODE_STOP);
+  //back-step so that if we at home, we find it again.
+  dir_ccw();
+  motor_enable();
+  for(int i = 0; i < 5; i++){
+    digitalWrite(MOT_STEP,HIGH);
+    delay(1);
+    digitalWrite(MOT_STEP,LOW);
+    delay(1);
+  }
+  motor_disable();
+  dir_cw();
 
-  Serial.println("Homing");
+  mode_move(50000,true,MODE_STOP);
+  
+#ifdef DIS_SSD1306
+  display.invertDisplay(false);
+  display.display();
+#endif
 }
 
 void loop(){ 
