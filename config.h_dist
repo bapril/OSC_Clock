@@ -1,3 +1,6 @@
+#define DIS_SSD1306 true // Enable and OLED LCD 128x32
+#define DIS_SERIAL true// Enable Serial output
+
 char ssid[] = "SSID";     //  your network SSID (name) 
 char password[] = "PASSWORD.";  // your network password
 const IPAddress outIp(10,10,5,1); //IP address to catch OSC messages from the clock.
