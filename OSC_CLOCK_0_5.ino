@@ -92,7 +92,7 @@
 
 #define IN_STEP       2
 #define INTER_STEP    2
-#define MIN_SYNC_STEPS 2 //minimum number of steps for a run_mode correction? 
+#define MIN_SYNC_STEPS 2 //minimum number of steps for a run_mode correction?
 
 //
 // Global Variables
@@ -107,6 +107,7 @@ bool shift_requested = false;
 bool sync_requested = false;
 bool display_ready = false;
 bool update_display = false;
+bool sync_enable = true; //when in MODE_RUN, check in with RTC from time to time.
 
 uint8_t sys_mode = MODE_STANDBY;
 uint8_t gear;
@@ -218,7 +219,8 @@ void IRAM_ATTR home_detected() {
  * /clock/now - Move to current time.
  * /clock/run - Move @ 1:1
  * /clock/gear $gear - Set the clock gear.
- * 
+ * /clock/sync/enable - When in MODE_RUN mode, periodically sync to the RTC.
+ * /clock/sync/disable - Don't sync to the RTC when in MODE_RUN
  * /clock/move/time $hour $minute $dir(1=cw, 0=ccw) $duration(seconds) $run_after(1=yes, 2=no);
  */
 
@@ -237,6 +239,14 @@ void clock_now(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) 
 
 void clock_run(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
   mode_run();
+}
+
+void clock_enable_sync(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  sync_enable = true;
+}
+
+void clock_disable_sync(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  sync_enable = false;
 }
 
 void clock_gear(OSCMessage &msg, __attribute__((unused)) int addrOffset){
@@ -274,6 +284,8 @@ void ClockAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   msg.route("/now", clock_now, addrOffset);
   msg.route("/run", clock_run, addrOffset);  
   msg.route("/gear", clock_gear, addrOffset);
+  msg.route("/sync/enable", clock_enable_sync, addrOffset);
+  msg.route("/sync/disable", clock_disable_sync, addrOffset);
 //  msg.route("/move/time", clock_move_time, addrOffset);
 //  msg.route("/speed", clock_speed, addrOffset);
 //  msg.route("/enable", enableStepper, addrOffset);
@@ -757,9 +769,8 @@ void loop(){
   yield();
   if(sync_requested){
     sync_requested = false;
-    if(sys_mode == MODE_RUN){
+    if(sys_mode == MODE_RUN && sync_enable)
        sync_clock(MODE_RUN);
-    }
   }
   display_refresh_counter ++;
   if(display_refresh_counter > 2048){
