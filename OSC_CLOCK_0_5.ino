@@ -7,6 +7,9 @@
  *     real and expected position of + or - 18 seconds in extreme cases.
  * TODO:
  * TODO: run modes with and without sync.
+ * TODO: Add speed control of MOVE/RUN commands.
+ * TODO: Anything backwards.
+ * TODO: Changing Direction should include a backlash calc.
  */
 
 //
@@ -112,6 +115,7 @@ bool sync_enable = true; //when in MODE_RUN, check in with RTC from time to time
 uint8_t sys_mode = MODE_STANDBY;
 uint8_t gear;
 uint8_t next_mode = MODE_STOP;
+uint8_t move_next_mode = MODE_STOP;
 uint8_t display_refresh_state = 0;
 
 int display_refresh_counter = 0;
@@ -125,6 +129,7 @@ DateTime rtc_now;
 
 unsigned long face_milis = 0;
 unsigned long gear_milis;
+unsigned long target_milis = 0; //when setting a move, where do we stop?
 
 String last_OSC_command = "NO-CMD";
 
@@ -212,16 +217,30 @@ void IRAM_ATTR home_detected() {
 //
 
 /*
- * //rtc/set $year $month $day $hour $minute $second
  * 
  * /clock/home - Move forward to midnight.
  * /clock/stop - Stop the Clock
  * /clock/now - Move to current time.
- * /clock/run - Move @ 1:1
+ * /clock/run - Move @ 1:1, will maintain sync if sync is enabled.
  * /clock/gear $gear - Set the clock gear.
  * /clock/sync/enable - When in MODE_RUN mode, periodically sync to the RTC.
  * /clock/sync/disable - Don't sync to the RTC when in MODE_RUN
- * /clock/move/time $hour $minute $dir(1=cw, 0=ccw) $duration(seconds) $run_after(1=yes, 2=no);
+ *
+ * /rtc/set $year $month $day $hour $minute $second
+ *
+ * /move/start - begin a move.
+ * /move/target $hour $minute - set face time to move to.
+ * /move/next/stop - After this move, stop
+ * /move/next/run - After this move, tick.
+ *
+ * //TODO
+ * /move/speed $speed - set a static speed.
+ * /move/time $seconds - calculate the move based on a duration.
+ *
+ * Maybe:
+ * /clock/enable - enable motor
+ * /clock/disable - disable motor
+ * /clock/nudge $minutes $dir - adjust the hand postion without changing the face time.
  */
 
 void clock_home(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
@@ -255,28 +274,48 @@ void clock_gear(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   }
 }
 
-/*void clock_move_time(OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  int hour,minute,direction;
-  unsigned long duration = 0;
-  unsigned long target_milis = 0;
-  unsigned long steps_to_go = 0;
-  unsigned long delta_milis = 0;
-
-  hour = msg.getInt(0);
-  minute = msg.getInt(1);
-  direction = msg.getInt(2); //TODO don't ignore direction
-  duration = msg.getInt(3) * 1000; // miliseconds.
-  target_milis = get_face_millis(hour,minute);
+void move_start(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  bool cw;
+  unsigned long delta_milis;
   if(target_milis > face_milis){
-    delta_milis = (target_face_milli - face_milis);
+    delta_milis = (target_milis - face_milis);
     cw = true;
   } else {
-    delta_milis = (face_milis - target_face_milli);
+    delta_milis = (face_milis - target_milis);
     cw = false;
   }
   steps_to_go = (int)delta_milis/gear_milis;
-  mode_move(steps_to_go,cw,after);
-}*/
+  mode_move(steps_to_go,cw,move_next_mode);
+}
+
+void move_target(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  target_milis = get_face_milis(msg.getInt(0),msg.getInt(1));
+}
+
+void move_next_stop(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  move_next_mode = MODE_STOP;
+}
+
+void move_next_run(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  move_next_mode = MODE_RUN;
+}
+
+void rtc_set(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  rtc.adjust(DateTime(msg.getInt(0), msg.getInt(1), msg.getInt(2), msg.getInt(3), msg.getInt(4), msg.getInt(5)));
+}
+
+void RTCAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  msg.route("/set",rtc_set, addrOffset);
+}
+
+void MoveAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  msg.route("/start", move_start, addrOffset);
+  msg.route("/target", move_target, addrOffset);
+  msg.route("/next/stop", move_next_stop, addrOffset);
+  msg.route("/next/run", move_next_run, addrOffset);
+  //msg.route("/speed", move_speed, addrOffset);
+  //msg.route("/time", move_time, addrOffset);
+}
 
 void ClockAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   msg.route("/home",clock_home, addrOffset);
@@ -286,10 +325,6 @@ void ClockAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   msg.route("/gear", clock_gear, addrOffset);
   msg.route("/sync/enable", clock_enable_sync, addrOffset);
   msg.route("/sync/disable", clock_disable_sync, addrOffset);
-//  msg.route("/move/time", clock_move_time, addrOffset);
-//  msg.route("/speed", clock_speed, addrOffset);
-//  msg.route("/enable", enableStepper, addrOffset);
-//  msg.route("/disable", disableStepper, addrOffset);
 }
 
 void OSCMsgReceive() {
@@ -304,6 +339,8 @@ void OSCMsgReceive() {
       last_OSC_command = String(address);
       update_display = true;
       msgIN.route("/clock", ClockAction);
+      msgIN.route("/rtc", RTCAction);
+      msgIN.route("/move", MoveAction);
     }
   }
 }
@@ -371,13 +408,13 @@ void mode_stop(){
   motor_disable();
 }
 
-unsigned long get_face_millis(int hour, int minute){
+unsigned long get_face_milis(int hour, int minute){
   if(hour > 12)
     hour = hour - 12;
   return ((minute * 60) + (hour * 3600)) * 1000;
 }
 
-unsigned long get_rtc_face_millis(){
+unsigned long get_rtc_face_milis(){
   int hour = rtc_now.hour();
   if (hour > 12) 
     hour = hour - 12;
@@ -451,16 +488,16 @@ void req_shift(int req_gear){
 
 void sync_clock(int after){
   bool cw;
-  unsigned long target_face_milli = get_rtc_face_millis();
+  unsigned long target_face_mili = get_rtc_face_milis();
   unsigned long steps_to_go = 0;
   unsigned long delta_milis = 0;
   dir_cw();
   //TODO choose shortest direction to move.
-  if(target_face_milli > face_milis){
-    delta_milis = (target_face_milli - face_milis);
+  if(target_face_mili > face_milis){
+    delta_milis = (target_face_mili - face_milis);
     cw = true;
   } else {
-    delta_milis = (face_milis - target_face_milli);
+    delta_milis = (face_milis - target_face_mili);
     cw = false;
   }
   if(delta_milis > gear_milis * MIN_SYNC_STEPS){
@@ -672,7 +709,6 @@ void setup() {
 #ifdef DIS_SERIAL
   Serial.begin(115200);  // start serial for output
   while (!Serial);
-  Serial.println("\nBegin:");
 #endif
 
 #ifdef DIS_SSD1306
