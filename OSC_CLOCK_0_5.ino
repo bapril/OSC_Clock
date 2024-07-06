@@ -5,7 +5,7 @@
  * Notes:
  * - Use caution when shifting. The current code shifts on request, this can cause offset between 
  *     real and expected position of + or - 18 seconds in extreme cases.
- * TODO:
+ *
  * TODO: run modes with and without sync.
  * TODO: Add speed control of MOVE/RUN commands.
  * TODO: Anything backwards.
@@ -80,10 +80,11 @@
 #define D_OSC_X       0
 #define D_OSC_Y       24
 
-#define MODE_STANDBY  0
-#define MODE_RUN      1
-#define MODE_MOVE     2
-#define MODE_STOP     3
+#define STATE_BOOT     0 // State entered by power-up, leave by homing
+#define STATE_RUN      1 // State where the clock keeps time based on the RTC.
+#define STATE_MOVE     2 // State where the clock moves to a tartget at a set rate.
+#define STATE_FADE     3 // State where the clock moves at variable speed
+#define STATE_STOP     4 // State where the clock is not moving. 
 
 #define OPTIC_PIN     D7
 #define MOT_STEP      D0
@@ -93,9 +94,10 @@
 #define MOT_M1        D6
 #define MOT_M2        D8
 
-#define IN_STEP       2
-#define INTER_STEP    2
+#define IN_STEP        2
+#define INTER_STEP     2
 #define MIN_SYNC_STEPS 2 //minimum number of steps for a run_mode correction?
+#define MAX_MILIS      43200000
 
 //
 // Global Variables
@@ -110,13 +112,14 @@ bool shift_requested = false;
 bool sync_requested = false;
 bool display_ready = false;
 bool update_display = false;
-bool sync_enable = true; //when in MODE_RUN, check in with RTC from time to time.
+bool sync_enable = true; //when in STATE_RUN, check in with RTC from time to time.
 
-uint8_t sys_mode = MODE_STANDBY;
+uint8_t sys_state = STATE_BOOT;
 uint8_t gear;
-uint8_t next_mode = MODE_STOP;
-uint8_t move_next_mode = MODE_STOP;
+uint8_t next_state = STATE_STOP;
+uint8_t move_next_state = STATE_STOP;
 uint8_t display_refresh_state = 0;
+uint8_t osc_msg_count = 0;
 
 int display_refresh_counter = 0;
 int tick_count = 0; //Count the inner_step loop (32 steps per step)
@@ -175,38 +178,59 @@ void IRAM_ATTR isr_step() {
     in_step --;
     if (!in_step) {
       digitalWrite(MOT_STEP,LOW);
-      if (sys_mode == MODE_MOVE){
+      if (sys_state == STATE_MOVE){
         steps_to_go--;
         if (!steps_to_go){
-          set_next_mode();
+          set_next_state();
         } else {
           to_step = INTER_STEP;
+        }
+      } else if (sys_state == STATE_FADE){
+        if(dir){
+          if ((face_milis + gear_milis) < target_milis){
+            to_step = INTER_STEP;
+          } else {
+            set_next_state();
+          }
+        } else {
+          if ((face_milis - gear_milis) > target_milis){
+            to_step = INTER_STEP;
+          } else {
+            set_next_state();
+          }
         }
       }
     }
   } else {
-    switch (sys_mode) {
-      case MODE_MOVE:
+    switch (sys_state) {
+      case STATE_MOVE:
         if(to_step){
           to_step--;
           if (!to_step)
             begin_step(IN_STEP);
         }      
         break;
-       case MODE_RUN:
-         if (start_step){
-           start_step = false;
-           begin_step(IN_STEP);
-           steps_to_go = 2; // Trick step-down so it doesn't take us out of move. 
-         }
-         break;
+      case STATE_RUN:
+        if (start_step){
+          start_step = false;
+          begin_step(IN_STEP);
+          steps_to_go = 2; // Trick step-down so it doesn't take us out of move. 
+        }
+        break;
+      case STATE_FADE:
+        if(to_step){
+          to_step--;
+          if (!to_step)
+            begin_step(IN_STEP);
+        }
+        break;
     }
   }
 }
 
 void IRAM_ATTR home_detected() {
   if (!homed){
-    mode_stop();
+    state_stop();
     homed = true;
   }
   face_milis = 0;
@@ -223,8 +247,8 @@ void IRAM_ATTR home_detected() {
  * /clock/now - Move to current time.
  * /clock/run - Move @ 1:1, will maintain sync if sync is enabled.
  * /clock/gear $gear - Set the clock gear.
- * /clock/sync/enable - When in MODE_RUN mode, periodically sync to the RTC.
- * /clock/sync/disable - Don't sync to the RTC when in MODE_RUN
+ * /clock/sync/enable - When in STATE_RUN mode, periodically sync to the RTC.
+ * /clock/sync/disable - Don't sync to the RTC when in STATE_RUN
  *
  * /rtc/set $year $month $day $hour $minute $second
  *
@@ -232,10 +256,15 @@ void IRAM_ATTR home_detected() {
  * /move/target $hour $minute - set face time to move to.
  * /move/next/stop - After this move, stop
  * /move/next/run - After this move, tick.
- *
+
+ * /fade/cw $number milis of the current target postion to move to clockwise. 
+ * /fade/ccw $number of milis of the current target position to move to anti-clockwise. 
+ 
  * //TODO
  * /move/speed $speed - set a static speed.
  * /move/time $seconds - calculate the move based on a duration.
+ * /motor/enable
+ * /motor/disable
  *
  * Maybe:
  * /clock/enable - enable motor
@@ -245,19 +274,19 @@ void IRAM_ATTR home_detected() {
 
 void clock_home(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
   homed = false;
-  mode_move(50000,true,MODE_STOP); 
+  state_move(50000,true,STATE_STOP); 
 }
 
 void clock_stop(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  mode_stop();
+  state_stop();
 }
 
 void clock_now(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  sync_clock(MODE_STOP);
+  sync_clock(STATE_STOP);
 }
 
 void clock_run(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  mode_run();
+  state_run();
 }
 
 void clock_enable_sync(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
@@ -285,7 +314,33 @@ void move_start(__attribute__((unused)) OSCMessage &msg, __attribute__((unused))
     cw = false;
   }
   steps_to_go = (int)delta_milis/gear_milis;
-  mode_move(steps_to_go,cw,move_next_mode);
+  state_move(steps_to_go,cw,move_next_state);
+}
+
+void fade_update_cw(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  target_milis = msg.getInt(0) * 1000;
+  if((face_milis + gear_milis) < target_milis){
+    Serial.print("Face: ");
+    Serial.print(face_milis);
+    Serial.print(".   Target: ");
+    Serial.println(target_milis);
+    state_fade(true);
+  } else {
+    Serial.println("Fade No step yet.");
+  }
+}
+
+void fade_update_ccw(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  target_milis = msg.getInt(0) * 1000;
+  if((face_milis - gear_milis) > target_milis){
+    Serial.print("Face: ");
+    Serial.print(face_milis);
+    Serial.print(".   Target: ");
+    Serial.println(target_milis);
+    state_fade(false);
+  } else {
+    Serial.println("Fade No step yet.");
+  }
 }
 
 void move_target(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
@@ -293,11 +348,11 @@ void move_target(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)
 }
 
 void move_next_stop(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  move_next_mode = MODE_STOP;
+  move_next_state = STATE_STOP;
 }
 
 void move_next_run(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  move_next_mode = MODE_RUN;
+  move_next_state = STATE_RUN;
 }
 
 void rtc_set(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
@@ -317,6 +372,11 @@ void MoveAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   //msg.route("/time", move_time, addrOffset);
 }
 
+void FadeAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  msg.route("/cw", fade_update_cw, addrOffset);
+  msg.route("/ccw", fade_update_ccw, addrOffset);
+}
+
 void ClockAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   msg.route("/home",clock_home, addrOffset);
   msg.route("/stop", clock_stop, addrOffset);
@@ -332,8 +392,11 @@ void OSCMsgReceive() {
   char address[255];
   int size;
   if((size = Udp.parsePacket())>0) {
+    Serial.println("Size: "+String(size));
     while(size--)
       msgIN.fill(Udp.read());
+    msgIN.fill(Udp.read());
+    osc_msg_count ++;
     if(!msgIN.hasError()) {
       msgIN.getAddress(address, 0);
       last_OSC_command = String(address);
@@ -341,6 +404,10 @@ void OSCMsgReceive() {
       msgIN.route("/clock", ClockAction);
       msgIN.route("/rtc", RTCAction);
       msgIN.route("/move", MoveAction);
+      msgIN.route("/fade", FadeAction);
+    } else {
+      last_OSC_command = "Error";
+      update_display = true;
     }
   }
 }
@@ -367,15 +434,15 @@ void dir_ccw(){
   digitalWrite(MOT_DIR, LOW);
 }
 
-void mode_standby(){
-  setMode(MODE_STANDBY);
+void state_boot(){
+  setState(STATE_BOOT);
   motor_disable();
 }
 
-void mode_run(){
+void state_run(){
   dir_cw();
   motor_enable();
-  setMode(MODE_RUN);
+  setState(STATE_RUN);
 }
 
 void begin_step(int step_time){
@@ -383,15 +450,31 @@ void begin_step(int step_time){
   digitalWrite(MOT_STEP,HIGH);
   if(dir){
     face_milis += gear_milis;
+    if (face_milis > MAX_MILIS)
+      face_milis -= MAX_MILIS;
   } else {
     face_milis -= gear_milis;
+    if (face_milis < 0)
+      face_milis += MAX_MILIS;
   }
 }
 
-void mode_move(unsigned long steps,bool clockwise, int after){
+void state_fade(bool clockwise){
+  next_state = STATE_STOP;
+  if(clockwise){
+    dir_cw();
+  } else {
+    dir_ccw();
+  }
+  motor_enable();
+  setState(STATE_FADE);
+  to_step = 1;
+}
+
+void state_move(unsigned long steps,bool clockwise, int state_after){
   if (steps < 1)
     return;
-  next_mode = after;
+  next_state = state_after;
   if(clockwise){
     dir_cw();
   } else {
@@ -399,12 +482,12 @@ void mode_move(unsigned long steps,bool clockwise, int after){
   }
   motor_enable();
   steps_to_go = steps;
-  setMode(MODE_MOVE);
+  setState(STATE_MOVE);
   to_step = 1;
 }
 
-void mode_stop(){
-  setMode(MODE_STOP);
+void state_stop(){
+  setState(STATE_STOP);
   motor_disable();
 }
 
@@ -502,20 +585,20 @@ void sync_clock(int after){
   }
   if(delta_milis > gear_milis * MIN_SYNC_STEPS){
     steps_to_go = (int)delta_milis/gear_milis;
-    mode_move(steps_to_go,cw,after); 
+    state_move(steps_to_go,cw,after); 
   }
 }
 
-void set_next_mode(){
-  switch (next_mode){
-    case MODE_STOP:
-      mode_stop();
+void set_next_state(){
+  switch (next_state){
+    case STATE_STOP:
+      state_stop();
       break;
-    case MODE_RUN:
-      mode_run();
+    case STATE_RUN:
+      state_run();
       break;
     default:
-      mode_stop();
+      state_stop();
   }
 }
 
@@ -526,8 +609,8 @@ String IpAddress2String(const IPAddress& ipAddress){
   String(ipAddress[3])  ; 
 }
 
-void setMode(int mode){
-  sys_mode = mode;
+void setState(int state){
+  sys_state = state;
   update_display = true;
 }
 
@@ -597,24 +680,27 @@ void say(String input){
 #endif
 }
 
-void displayMode(){
+void displayState(){
   if(!display_ready){ return;} //May not need anymore now called in displayGear
 #ifdef DIS_SSD1306
   display.fillRect(D_MODE_X, D_MODE_Y, D_GEAR_X, 8, SSD1306_BLACK);
   display.setCursor(D_MODE_X,D_MODE_Y);
 #endif
-  switch(sys_mode){
-  case MODE_STANDBY:
-    say("M:STANDBY");
+  switch(sys_state){
+  case STATE_BOOT:
+    say("S:BOOT ");
     break;
-  case MODE_RUN:
-    say("M:RUN    ");
+  case STATE_RUN:
+    say("S:RUN  ");
     break;
-  case MODE_MOVE:
-    say("M:MOVE   ");
+  case STATE_MOVE:
+    say("S:MOVE ");
     break;
-  case MODE_STOP:
-    say("M:STOP   ");
+  case STATE_FADE:
+    say("S:FADE ");
+    break;
+  case STATE_STOP:
+    say("S:STOP ");
     break;
   }
 #ifdef DIS_SERIAL
@@ -629,6 +715,7 @@ void displayGear(){
   display.setCursor(D_GEAR_X,D_MODE_Y);
 #endif
   say("G: "+String(gear));
+  say(" C: "+String(osc_msg_count));
 #ifdef DIS_SERIAL
   Serial.println("");
 #endif
@@ -649,7 +736,7 @@ void displayFaceTime(){
   display.fillRect(D_FACE_X, D_FACE_Y, 128, 8, SSD1306_BLACK);
   display.setCursor(D_FACE_X,D_FACE_Y);
 #endif
-  say("FFace: ");
+  say("FCE: ");
   display_face_time();
 }
 
@@ -675,7 +762,7 @@ void clear_display(){
 void displayRefresh(){
   switch(display_refresh_state){
   case 0:
-    displayMode();
+    displayState();
     break;
   case 1:
     displayGear();
@@ -701,7 +788,7 @@ void displayRefresh(){
 
 void setup() {
   req_shift(STARTUP_GEAR);
-  mode_standby();
+  state_boot();
 
   ESP.wdtEnable(1000);
   Wire.begin();
@@ -796,7 +883,7 @@ void setup() {
   }
   motor_disable();
   dir_cw();
-  mode_move(50000,true,MODE_STOP);
+  state_move(50000,true,STATE_STOP);
 }
 
 void loop(){ 
@@ -805,12 +892,13 @@ void loop(){
   yield();
   if(sync_requested){
     sync_requested = false;
-    if(sys_mode == MODE_RUN && sync_enable)
-       sync_clock(MODE_RUN);
+    if(sys_state == STATE_RUN && sync_enable)
+       sync_clock(STATE_RUN);
   }
   display_refresh_counter ++;
   if(display_refresh_counter > 2048){
     displayRefresh();
+    display_refresh_counter = 0;
     update_display = false;
   }
 }
