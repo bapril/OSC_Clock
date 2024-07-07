@@ -49,6 +49,16 @@
 #define SCREEN_HEIGHT 64 // OLED display height, in pixels
 #define OLED_RESET     -1 // Reset pin # (or -1 if sharing Arduino reset pin)
 #define SCREEN_ADDRESS 0x3D ///< See datasheet for Address; 0x3D for 128x64, 0x3C for 128x32
+
+#define D_MODE_X      0
+#define D_MODE_Y      0
+#define D_GEAR_X      64
+#define D_RTC_X       0
+#define D_RTC_Y       8
+#define D_FACE_X      0
+#define D_FACE_Y      16
+#define D_OSC_X       0
+#define D_OSC_Y       24
 #endif
 
 //Set the timer 1 prescaler to 1:1, short timer, but more accurate. 
@@ -70,34 +80,19 @@
 #define GEAR_STEP_16  1125
 #define GEAR_STEP_32  562.5
 
-#define D_MODE_X      0
-#define D_MODE_Y      0
-#define D_GEAR_X      64
-#define D_RTC_X       0
-#define D_RTC_Y       8
-#define D_FACE_X      0
-#define D_FACE_Y      16
-#define D_OSC_X       0
-#define D_OSC_Y       24
-
 #define STATE_BOOT     0 // State entered by power-up, leave by homing
 #define STATE_RUN      1 // State where the clock keeps time based on the RTC.
 #define STATE_MOVE     2 // State where the clock moves to a tartget at a set rate.
 #define STATE_FADE     3 // State where the clock moves at variable speed
 #define STATE_STOP     4 // State where the clock is not moving. 
 
-#define OPTIC_PIN     D7
-#define MOT_STEP      D0
-#define MOT_DIR       D3
-#define MOT_EN        D4
-#define MOT_M0        D5
-#define MOT_M1        D6
-#define MOT_M2        D8
-
 #define IN_STEP        2
 #define INTER_STEP     2
 #define MIN_SYNC_STEPS 2 //minimum number of steps for a run_mode correction?
-#define MAX_MILIS      43200000
+#define HOUR_2_MILIS   3600 * 1000
+#define MAX_MILIS      12 * HOUR_2_MILIS //12 hours
+#define MID_MILIS      6 * HOUR_2_MILIS // 6 hours
+#define SERIAL_SPEED   74880
 
 //
 // Global Variables
@@ -113,6 +108,9 @@ bool sync_requested = false;
 bool display_ready = false;
 bool update_display = false;
 bool sync_enable = true; //when in STATE_RUN, check in with RTC from time to time.
+#ifdef RUN_TESTS
+bool tests_run = false;
+#endif
 
 uint8_t sys_state = STATE_BOOT;
 uint8_t gear;
@@ -133,6 +131,7 @@ DateTime rtc_now;
 unsigned long face_milis = 0;
 unsigned long gear_milis;
 unsigned long target_milis = 0; //when setting a move, where do we stop?
+unsigned long face_delta = 0;
 
 String last_OSC_command = "NO-CMD";
 
@@ -176,29 +175,26 @@ void IRAM_ATTR TimerHandler() {
 void IRAM_ATTR isr_step() {
   if (in_step > 0){
     in_step --;
-    if (!in_step) {
+    if(in_step < 1){ //Step is over, stop it. 
       digitalWrite(MOT_STEP,LOW);
-      if (sys_state == STATE_MOVE){
-        steps_to_go--;
-        if (!steps_to_go){
-          set_next_state();
-        } else {
-          to_step = INTER_STEP;
-        }
-      } else if (sys_state == STATE_FADE){
-        if(dir){
-          if ((face_milis + gear_milis) < target_milis){
-            to_step = INTER_STEP;
-          } else {
+      switch(sys_state){
+        case STATE_MOVE:
+          steps_to_go--;
+          if (!steps_to_go){
             set_next_state();
-          }
-        } else {
-          if ((face_milis - gear_milis) > target_milis){
-            to_step = INTER_STEP;
           } else {
-            set_next_state();
+            to_step = INTER_STEP;
           }
-        }
+          break;
+        case STATE_FADE:
+          //if we still have distance to travel, move. 
+          if(dir){ //clockwise
+            if (face_milis < target_milis)
+              to_step = INTER_STEP;
+          } else { //counter-clockwise
+            if (face_milis > target_milis)
+              to_step = INTER_STEP;
+        }           
       }
     }
   } else {
@@ -219,9 +215,15 @@ void IRAM_ATTR isr_step() {
         break;
       case STATE_FADE:
         if(to_step){
-          to_step--;
-          if (!to_step)
-            begin_step(IN_STEP);
+          unsigned long fd = face_milis + face_delta;
+          unsigned long td = target_milis + face_delta;
+          if(dir){
+            if ((fd + gear_milis) < td)
+              begin_step(IN_STEP);
+          } else {
+            if ((fd - gear_milis) > td)
+              begin_step(IN_STEP);
+          }
         }
         break;
     }
@@ -257,8 +259,8 @@ void IRAM_ATTR home_detected() {
  * /move/next/stop - After this move, stop
  * /move/next/run - After this move, tick.
 
- * /fade/cw $number milis of the current target postion to move to clockwise. 
- * /fade/ccw $number of milis of the current target position to move to anti-clockwise. 
+ * /fade $number milis of the current target postion to move to clockwise. 
+         This mode determines based on this value and the next which direction to move. 
  
  * //TODO
  * /move/speed $speed - set a static speed.
@@ -317,30 +319,67 @@ void move_start(__attribute__((unused)) OSCMessage &msg, __attribute__((unused))
   state_move(steps_to_go,cw,move_next_state);
 }
 
-void fade_update_cw(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  target_milis = msg.getInt(0) * 1000;
-  if((face_milis + gear_milis) < target_milis){
-    Serial.print("Face: ");
-    Serial.print(face_milis);
-    Serial.print(".   Target: ");
-    Serial.println(target_milis);
-    state_fade(true);
+unsigned long calc_face_delta(unsigned long face){
+  unsigned long delta = 0;
+  if(face != MID_MILIS) {
+      delta = MID_MILIS - face;
+  }
+  return delta;
+}
+
+bool calc_direction(unsigned long face, unsigned long target){
+  face_delta = calc_face_delta(face);
+  face += face_delta;
+  target += face_delta;
+  if(face < target){ 
+      return true;
   } else {
-    Serial.println("Fade No step yet.");
+      return false;
+  } 
+}
+
+#ifdef RUN_TESTS
+void test_calc_direction(){
+  if(calc_direction(3 * HOUR_2_MILIS, 1 * HOUR_2_MILIS) != false)
+    Serial.println("3:00 -> 1:00 failed.");
+  if(calc_direction(1 * HOUR_2_MILIS, 3 * HOUR_2_MILIS) != true)
+    Serial.println("1:00 -> 3:00 failed.");
+  if(calc_direction(10 * HOUR_2_MILIS, 3 * HOUR_2_MILIS) != true)
+    Serial.println("10:00 -> 3:00 failed.");
+  if(calc_direction(10 * HOUR_2_MILIS, 8 * HOUR_2_MILIS) != false)
+    Serial.println("10:00 -> 8:00 failed.");
+}
+#endif
+
+bool within_step(unsigned long face, unsigned long target, unsigned long gear){
+  if(face == target){
+    return true;
+  } else {
+    if(target < (face - gear)){
+      return false;
+    } else if (target > (face + gear)) {
+      return false;
+    } else {
+      return true;
+    }    
   }
 }
 
-void fade_update_ccw(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  target_milis = msg.getInt(0) * 1000;
-  if((face_milis - gear_milis) > target_milis){
-    Serial.print("Face: ");
-    Serial.print(face_milis);
-    Serial.print(".   Target: ");
-    Serial.println(target_milis);
-    state_fade(false);
+void fade_update(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
+  unsigned long recip_milis;
+  target_milis = msg.getInt(0) * 1000; //Input is seconds, turn in to miliseconds.
+  bool direction = calc_direction(face_milis, target_milis);
+  Serial.print(face_milis);
+  Serial.print(",");
+  Serial.print(target_milis);
+  Serial.print(",");
+  Serial.println(direction);
+  if(direction){
+    dir_cw();
   } else {
-    Serial.println("Fade No step yet.");
-  }
+    dir_ccw();
+  } 
+  state_fade();
 }
 
 void move_target(__attribute__((unused)) OSCMessage &msg, __attribute__((unused)) int addrOffset){
@@ -368,13 +407,6 @@ void MoveAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
   msg.route("/target", move_target, addrOffset);
   msg.route("/next/stop", move_next_stop, addrOffset);
   msg.route("/next/run", move_next_run, addrOffset);
-  //msg.route("/speed", move_speed, addrOffset);
-  //msg.route("/time", move_time, addrOffset);
-}
-
-void FadeAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
-  msg.route("/cw", fade_update_cw, addrOffset);
-  msg.route("/ccw", fade_update_ccw, addrOffset);
 }
 
 void ClockAction(OSCMessage &msg, __attribute__((unused)) int addrOffset){
@@ -392,7 +424,6 @@ void OSCMsgReceive() {
   char address[255];
   int size;
   if((size = Udp.parsePacket())>0) {
-    Serial.println("Size: "+String(size));
     while(size--)
       msgIN.fill(Udp.read());
     msgIN.fill(Udp.read());
@@ -404,7 +435,7 @@ void OSCMsgReceive() {
       msgIN.route("/clock", ClockAction);
       msgIN.route("/rtc", RTCAction);
       msgIN.route("/move", MoveAction);
-      msgIN.route("/fade", FadeAction);
+      msgIN.route("/fade", fade_update);
     } else {
       last_OSC_command = "Error";
       update_display = true;
@@ -446,28 +477,26 @@ void state_run(){
 }
 
 void begin_step(int step_time){
+  unsigned long hold = face_milis;
   in_step = step_time;
   digitalWrite(MOT_STEP,HIGH);
   if(dir){
     face_milis += gear_milis;
-    if (face_milis > MAX_MILIS)
+    if (face_milis > MAX_MILIS) // Cross 12 hours, loop back around. 
       face_milis -= MAX_MILIS;
   } else {
     face_milis -= gear_milis;
-    if (face_milis < 0)
-      face_milis += MAX_MILIS;
+    if (face_milis > MAX_MILIS) //We underflowed the value, reset. 
+      face_milis = MAX_MILIS - (gear_milis - hold); 
   }
+  to_step = 0;
 }
 
-void state_fade(bool clockwise){
-  next_state = STATE_STOP;
-  if(clockwise){
-    dir_cw();
-  } else {
-    dir_ccw();
+void state_fade(){
+  if (sys_state != STATE_FADE){
+    motor_enable();
+    setState(STATE_FADE);
   }
-  motor_enable();
-  setState(STATE_FADE);
   to_step = 1;
 }
 
@@ -793,10 +822,10 @@ void setup() {
   ESP.wdtEnable(1000);
   Wire.begin();
 
-#ifdef DIS_SERIAL
-  Serial.begin(115200);  // start serial for output
+//#ifdef DIS_SERIAL
+  Serial.begin(SERIAL_SPEED);  // start serial for output
   while (!Serial);
-#endif
+//#endif
 
 #ifdef DIS_SSD1306
   //SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
@@ -887,6 +916,14 @@ void setup() {
 }
 
 void loop(){ 
+#ifdef RUN_TESTS
+  if(!tests_run){
+    Serial.println("Running tests:");
+    test_calc_direction();
+    Serial.println("DONE");
+  }
+  tests_run = true;
+#endif
   ESP.wdtFeed();
   OSCMsgReceive();
   yield();
